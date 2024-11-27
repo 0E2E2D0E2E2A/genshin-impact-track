@@ -84,7 +84,7 @@ function Get-GenshinLogPath {
             return $null
         }
     }
-}
+} 
 
 function Invoke-RunAsAdminPrompt {
     if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -159,10 +159,53 @@ Press [ENTER] to continue, or any key to cancel." -ForegroundColor DarkCyan
     }
 }
 
+function Get-AllGachaLogs {
+    param (
+        [string]$WishUrl
+    )
+    # Начальные параметры
+    $page = 1
+    $allLogs = @()
+
+    while ($true) {
+        # Генерация URL с учетом текущей страницы
+        $url = "$WishUrl&page=$page&size=5&gacha_type=301"
+
+        # Отправка запроса к API
+        try {
+            $response = Invoke-RestMethod -URI $url -ContentType 'application/json' -Method Get
+
+            if ($response.message -ne "OK") {
+                Write-Host "API ответ не OK! Прекращение получения данных..." -ForegroundColor Red
+                break
+            }
+
+            # Добавление логов текущей страницы в общий список
+            $allLogs += $response.data
+
+            # Проверка на наличие следующей страницы
+            if ($response.data.Count -lt 5) {
+                Write-Host "Все страницы загружены." -ForegroundColor Green
+                break
+            }
+
+            # Переход на следующую страницу
+            $page++
+        }
+        catch {
+            Write-Host "Ошибка при обращении к API: $_" -ForegroundColor Red
+            break
+        }
+    }
+
+    return $allLogs
+}
+
+
 function Get-GenshinWishUrl {
     $LogPath = Get-GenshinLogPath
     if (-not $LogPath) {
-        Write-Host "Cannot find Genshin Impact log file! Make sure to run Genshin Impact and open the wish history at least once!" -ForegroundColor Red
+        Write-Host "Cannot find Genshin Impact log file!" -ForegroundColor Red
         Invoke-RunAsAdminPrompt
         return $null
     }
@@ -172,66 +215,57 @@ function Get-GenshinWishUrl {
     $LogMatch = $LogsContent -match $GameDataPathRegexPattern
 
     if (-not $LogMatch) {
-        Write-Host "Cannot find Genshin Impact path in log file! Make sure to run Genshin Impact and open the wish history at least once!" -ForegroundColor Red
-        Pause
+        Write-Host "Cannot find Genshin Impact path in log file!" -ForegroundColor Red
         return $null
     }
 
     $GameDataPath = ($LogMatch | Select-Object -Last 1) -match $GameDataPathRegexPattern
     $GameDataPath = $Matches[0]
     $CacheFolderPath = "$GameDataPath/webCaches"
-    try {
-        if (Test-Path "$CacheFolderPath") {
-            Write-Host "Cache folder found! Trying to extract latest cache file..." -ForegroundColor Green
-            try {
-                $cacheVerPath = Get-Item (Get-ChildItem -Path "$GameDataPath/webCaches" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-                $cachePath = "$cacheVerPath/Cache/Cache_Data/data_2"
 
-                if (-not (Test-Path $cachePath)) {
-                    throw "Cache file not found!"
-                }
+    if (Test-Path "$CacheFolderPath") {
+        Write-Host "Cache folder found! Trying to extract latest cache file..." -ForegroundColor Green
+        try {
+            $cacheVerPath = Get-Item (Get-ChildItem -Path "$GameDataPath/webCaches" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+            $cachePath = "$cacheVerPath/Cache/Cache_Data/data_2"
 
-                # check cache not older than 2 days
-                if ((Get-Item $cachePath).LastWriteTime -le $(Get-Date).AddDays(-2)) {
-                    throw "Cache file is too old!"
-                }
-
-                $tmpFile = "$env:TEMP/ch_data_2"
-                Copy-Item $cachePath -Destination $tmpFile
-                $content = Get-Content -Encoding UTF8 -Raw $tmpfile
-                Remove-Item $tmpFile
-
-                $splitted = $content -split "1/0/" | Select-Object -Last 1
-                $found = $splitted -match "https.+?game_biz=hk4e_(global|cn)"
-                if ($found) {
-                    $cacheVer = Split-Path $cacheVerPath -Leaf
-                    Write-Host "Wish URL file found in $cacheVer cache! Validating wish URL..." -ForegroundColor Green
-                    $wishUrl = Get-ValidatedWishUrl $Matches[0]
-                    if ($wishUrl) {
-                        Write-Host "Wish URL validated!" -ForegroundColor Green
-                        Set-Clipboard -Value $WishUrl
-                        Write-Host "URL copied to clipboard, paste it on any Genshin Impact ($([char]0x539f)$([char]0x795e)) wish tracker`nor Ctrl-Click to open in web browser." -ForegroundColor Green
-                        return $wishUrl
-                    }
-                }
-                throw "No valid URL found in cache!"
+            if (-not (Test-Path $cachePath)) {
+                throw "Cache file not found!"
             }
-            catch {
-                Write-Host "Encountered error: "$_.Exception.Message -ForegroundColor Yellow
-                Write-Host "Cache folder was found but could not find valid wish URL in the files!" -ForegroundColor Yellow
-                Invoke-PromptClearCache "$CacheFolderPath"
+
+            # копируем временный файл
+            $tmpFile = "$env:TEMP/ch_data_2"
+            Copy-Item $cachePath -Destination $tmpFile
+            $content = Get-Content -Encoding UTF8 -Raw $tmpFile
+            Remove-Item $tmpFile
+
+            # Извлекаем URL
+            $splitted = $content -split "1/0/" | Select-Object -Last 1
+            $found = $splitted -match "https.+?game_biz=hk4e_(global|cn)"
+            if ($found) {
+                $wishUrl = $Matches[0]
+                Write-Host "Extracted URL: $wishUrl" -ForegroundColor Green
+
+                # Получаем все логи с использованием пагинации
+                $allLogs = Get-AllGachaLogs -WishUrl $wishUrl
+                if ($allLogs) {
+                    Write-Host "Получены все логи: $($allLogs.Count) записей." -ForegroundColor Green
+                    Set-Clipboard -Value $allLogs
+                }
+                else {
+                    Write-Host "Не удалось загрузить все логи." -ForegroundColor Red
+                }
             }
         }
-        else {
-            throw "Cache folder was not found! Please restart Genshin Impact and reopen `"Wish History`"!"
+        catch {
+            Write-Host "Ошибка при получении данных: $($_.Exception.Message)" -ForegroundColor Red
         }
     }
-    catch {
-        Write-Host "Encountered error: "$_.Exception.Message -ForegroundColor Red
-        Pause
+    else {
+        Write-Host "Cache folder was not found!" -ForegroundColor Red
     }
-    return $null
 }
+
 
 # Run the script
 Get-GenshinWishUrl
